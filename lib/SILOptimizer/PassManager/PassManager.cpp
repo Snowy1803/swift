@@ -70,6 +70,8 @@ llvm::cl::opt<std::string> SILNumOptPassesToRun(
     "sil-opt-pass-count", llvm::cl::init(""),
     llvm::cl::desc("Stop optimizing after <N> passes or <N>.<M> passes/sub-passes"));
 
+llvm::StringRef SILVerifierCurrentPassName = "SILGen";
+
 // Read pass counts for each module from a config file.
 // Config file format:
 //   <module-name>:<pass-count>(.<sub-pass-count>)?
@@ -747,6 +749,7 @@ void SILPassManager::runPassOnFunction(unsigned TransIdx, SILFunction *F) {
   if (!CurrentPassHasInvalidated && !currentPassDependsOnCalleeBodies)
     completedPasses.set((size_t)SFT->getPassKind());
 
+  SILVerifierCurrentPassName = Transformations[TransIdx]->getTag();
   if (getOptions().VerifyAll &&
       (CurrentPassHasInvalidated || SILVerifyWithoutInvalidation)) {
     F->verify(getAnalysis<BasicCalleeAnalysis>()->getCalleeCache());
@@ -764,6 +767,7 @@ void SILPassManager::runPassOnFunction(unsigned TransIdx, SILFunction *F) {
       runSwiftFunctionVerification(F);
     }
   }
+  SILVerifierCurrentPassName = "None";
 
   ++NumPassesRun;
 }
@@ -899,6 +903,7 @@ void SILPassManager::runModulePass(unsigned TransIdx) {
 
   updateSILModuleStatsAfterTransform(*Mod, SMT, *this, NumPassesRun, duration.count());
 
+  SILVerifierCurrentPassName = SMT->getTag();
   if (Options.VerifyAll &&
       (CurrentPassHasInvalidated || !SILVerifyWithoutInvalidation)) {
     Mod->verify(getAnalysis<BasicCalleeAnalysis>()->getCalleeCache());
@@ -916,6 +921,7 @@ void SILPassManager::runModulePass(unsigned TransIdx) {
       runSwiftModuleVerification();
     }
   }
+  SILVerifierCurrentPassName = "None";
 }
 
 void SILPassManager::verifyAnalyses() const {
@@ -1096,7 +1102,9 @@ void SILPassManager::addFunctionToWorklist(SILFunction *F,
     // this function to the pass manager to ensure that we perform this
     // verification.
     if (getOptions().VerifyAll) {
+      SILVerifierCurrentPassName = "FunctionCreation";
       F->verify(getAnalysis<BasicCalleeAnalysis>()->getCalleeCache());
+      SILVerifierCurrentPassName = "None";
     }
 
     NewLevel = DerivationLevels[DerivedFrom] + 1;

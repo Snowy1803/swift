@@ -25,6 +25,7 @@
 #include "swift/AST/SemanticAttrs.h"
 #include "swift/AST/Types.h"
 #include "swift/Basic/Range.h"
+#include "swift/Basic/SourceManager.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "swift/SIL/AddressWalker.h"
 #include "swift/SIL/ApplySite.h"
@@ -89,6 +90,8 @@ static llvm::cl::opt<bool> SkipConvertEscapeToNoescapeAttributes(
 static llvm::cl::opt<bool> AllowCriticalEdges("allow-critical-edges",
                                               llvm::cl::init(true));
 extern llvm::cl::opt<bool> SILPrintDebugInfo;
+
+extern llvm::StringRef SILVerifierCurrentPassName;
 
 // The verifier is basically all assertions, so don't compile it with NDEBUG to
 // prevent release builds from triggering spurious unused variable warnings.
@@ -844,7 +847,7 @@ class SILVerifier : public SILVerifierBase<SILVerifier> {
   llvm::DenseSet<std::pair<SILValue, const Operand *>> isOperandInValueUsesCache;
 
   /// Used for checking all equivalent variables have the same type
-  using VarID = std::tuple<const SILDebugScope *, llvm::StringRef, SILLocation>;
+  using VarID = std::tuple<const SILDebugScope *, llvm::StringRef, unsigned, unsigned>;
   llvm::DenseMap<VarID, SILType> DebugVarTypes;
   llvm::StringSet<> VarNames;
 
@@ -1553,19 +1556,28 @@ public:
     llvm::StringRef UniqueName = VarNames.insert(varInfo->Name).first->getKey();
     if (!varInfo->Loc)
       varInfo->Loc = inst->getLoc();
-    if (!varInfo->Loc)
+    unsigned line = 0, col = 0;
+    if (varInfo->Loc && varInfo->Loc->getSourceLoc().isValid()) {
+      auto [line1, col1] = inst->getModule().getSourceManager().getPresumedLineAndColumnForLoc(varInfo->Loc->getSourceLoc(), 0);
+      line = line1;
+      col = col1;
+    }
       varInfo->Loc = SILLocation::invalid();
     VarID Key(varInfo->Scope ? varInfo->Scope : debugScope,
-              UniqueName, *varInfo->Loc);
-    auto CachedVar = DebugVarTypes.insert({Key, DebugVarTy});
-    if (!CachedVar.second) {
-      auto lhs = CachedVar.first->second.removingMoveOnlyWrapper();
-      auto rhs = DebugVarTy.removingMoveOnlyWrapper();
+              UniqueName, line, col);
+    if (!dyn_cast<AllocBoxInst>(inst)) {
+      auto CachedVar = DebugVarTypes.insert({Key, DebugVarTy});
+      if (!CachedVar.second) {
+        if (!CachedVar.second) {
+          auto lhs = CachedVar.first->second.removingMoveOnlyWrapper();
+          auto rhs = DebugVarTy.removingMoveOnlyWrapper();
 
-      require(lhs == rhs ||
-              (lhs.isAddress() && lhs.getObjectType() == rhs) ||
-              (DebugVarTy.isAddress() && lhs == rhs.getObjectType()),
-              "Two variables with different type but same scope!");
+          require(lhs == rhs ||
+                  (lhs.isAddress() && lhs.getObjectType() == rhs) ||
+                  (DebugVarTy.isAddress() && lhs == rhs.getObjectType()),
+                  "Two variables with different type but same scope!");
+        }
+      }
     }
 
     // Check debug info expression
@@ -7091,6 +7103,23 @@ public:
     verifyBranches(F);
 
     visitSILBasicBlocks(F);
+
+    unsigned count = 0;
+    for (auto &var : F->getDebugVariables()) {
+      if (DebugVarTypes.contains(var))
+        continue;
+//      llvm::dbgs() << "Lost track of variable: " << std::get<1>(var) << " in " << F->getName() << '\n';
+      count++;
+    }
+    if (count/* && SILVerifierCurrentPassName == "mem2reg" && !F->isSpecialization() && F->size() == 1*/) {
+      llvm::dbgs() << "SVCPLV " << SILVerifierCurrentPassName << ' ' << count << '\n';
+//      require(false, "PASS shouldnt lose debug info");
+    }
+    F->getDebugVariables().clear();
+    for (auto var : DebugVarTypes) {
+      F->getDebugVariables().insert(var.first);
+    }
+    std::swap(F->VarNames, VarNames);
 
     if (F->hasOwnership() && F->shouldVerifyOwnership() &&
         !mod.getASTContext().hadError()) {

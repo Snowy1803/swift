@@ -291,6 +291,11 @@ private:
   /// The head of a single-linked list of currently alive OperandBitfields.
   OperandBitfield *newestAliveOperandBitfield = nullptr;
 
+public:
+  using VarID = std::tuple<const SILDebugScope *, llvm::StringRef, unsigned, unsigned>;
+  llvm::StringSet<> VarNames;
+  llvm::DenseSet<VarID> DebugVariables;
+private:
   /// A monotonically increasing ID which is incremented whenever a
   /// BasicBlockBitfield, NodeBitfield, or OperandBitfield is constructed.  For
   /// details see SILBitfield::bitfieldID;
@@ -585,6 +590,8 @@ public:
     auto fnType = getLoweredFunctionTypeInContext(getTypeExpansionContext());
     return SILFunctionConventions(fnType, getModule());
   }
+
+  llvm::DenseSet<VarID> &getDebugVariables() { return DebugVariables; }
 
   unsigned getIndex() const { return index; }
 

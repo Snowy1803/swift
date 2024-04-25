@@ -1,0 +1,32 @@
+#!/usr/bin/awk -f
+
+# This source file is part of the Swift.org open source project
+#
+# Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
+# Licensed under Apache License v2.0 with Runtime Library Exception
+#
+# See https://swift.org/LICENSE.txt for license information
+# See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+
+BEGIN {
+  print "pass count"
+}
+
+$1 == "SVCPLV" {
+  stats[$2] += $3
+}
+
+END {
+  for (i in stats)
+    print i, stats[i]
+  ORS = " "
+  system("dsymutil ./_build/Ninja-RelWithDebInfoAssert+stdlib-DebugAssert/swift-macosx-arm64/lib/swift/macosx/libswiftCore.dylib")
+  print "local-vars-intel"
+  system("dwarfdump --statistics ./_build/Ninja-RelWithDebInfoAssert+stdlib-DebugAssert/swift-macosx-arm64/lib/swift/macosx/libswiftCore.dylib.dSYM -arch x86_64 | jq -M '.\"#local vars\"'")
+  print "local-vars-arm64"
+  system("dwarfdump --statistics ./_build/Ninja-RelWithDebInfoAssert+stdlib-DebugAssert/swift-macosx-arm64/lib/swift/macosx/libswiftCore.dylib.dSYM -arch arm64 | jq -M '.\"#local vars\"'")
+  print "params-intel"
+  system("dwarfdump --statistics ./_build/Ninja-RelWithDebInfoAssert+stdlib-DebugAssert/swift-macosx-arm64/lib/swift/macosx/libswiftCore.dylib.dSYM -arch x86_64 | jq -M '.\"#params\"'")
+  print "params-arm64"
+  system("dwarfdump --statistics ./_build/Ninja-RelWithDebInfoAssert+stdlib-DebugAssert/swift-macosx-arm64/lib/swift/macosx/libswiftCore.dylib.dSYM -arch arm64 | jq -M '.\"#params\"'")
+}
