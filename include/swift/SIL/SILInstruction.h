@@ -5676,12 +5676,8 @@ public:
     std::optional<SILLocation> VarDeclLoc;
     const SILDebugScope *VarDeclScope = nullptr;
 
-    if (HasAuxDebugVariableType)
-      AuxVarType = *getTrailingObjects<SILType>();
-    // TODO: passes break if we set the type here, as the type of the operand
-    // can be changed during a pass.
-    // else if (complete)
-    //   AuxVarType = getOperand()->getType().getObjectType();
+    assert(HasAuxDebugVariableType && "DebugValueInst must always have a stored variable type");
+    AuxVarType = *getTrailingObjects<SILType>();
 
     if (hasAuxDebugLocation())
       VarDeclLoc = *getTrailingObjects<SILLocation>();

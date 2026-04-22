@@ -313,8 +313,6 @@ void SROAMemoryUseAnalyzer::chopUpAlloca(std::vector<AllocStackInst *> &Worklist
         VarInfo.DIExpr.append(
           SILDebugInfoExpression::createFragment(SD->getStoredProperties()[i]));
       }
-      if (!VarInfo.Type)
-        VarInfo.Type = AI->getElementType();
       B.createDebugValue(DVI->getLoc(), NewAI, VarInfo);
     }
     if (NewAllocations.empty()) {

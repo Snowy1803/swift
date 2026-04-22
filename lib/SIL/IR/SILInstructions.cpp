@@ -457,8 +457,10 @@ DebugValueInst *DebugValueInst::create(SILDebugLocation DebugLoc,
     Var.Loc = {};
   if (Var.Scope == DebugLoc.getScope())
     Var.Scope = nullptr;
-  if (Var.Type == Operand->getType().getObjectType())
-    Var.Type = {};
+  // Always store the variable type so it doesn't drift when passes change
+  // the SSA operand type.
+  if (!Var.Type)
+    Var.Type = Operand->getType().getObjectType();
   void *buf = allocateDebugVarCarryingInst<DebugValueInst>(M, Var);
   return ::new (buf)
     DebugValueInst(DebugLoc, Operand, Var, poisonRefs, wasMoved, trace);
