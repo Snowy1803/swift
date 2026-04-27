@@ -1802,10 +1802,25 @@ public:
     
     SILType DebugVarTy = varInfo->Type ? *varInfo->Type :
       SSAType.getObjectType();
-    if (!varInfo->DIExpr && !isa<SILBoxType>(SSAType.getASTType())) {
-      // FIXME: Remove getObjectType() below when we fix create/createAddr
-      require(DebugVarTy.removingMoveOnlyWrapper()
-              == SSAType.getObjectType().removingMoveOnlyWrapper(),
+    // Check type consistency when the DIExpr is empty or contains only
+    // op_deref. A bare op_deref just means "SSA is an address, deref to get
+    // the value" so the object types should still match.
+    bool exprIsDerefOnly = varInfo->DIExpr &&
+      varInfo->DIExpr.getNumElements() == 1 && varInfo->DIExpr.startsWithDeref();
+    if ((!varInfo->DIExpr || exprIsDerefOnly) &&
+        !isa<SILBoxType>(SSAType.getASTType())) {
+      // Compare types after normalizing away differences that don't affect
+      // debug info: move-only wrappers (getASTType() strips those) and
+      // @substituted function type annotations (IRGen strips those before
+      // emitting DWARF via replaceSubstitutedSILFunctionTypesWithUnsubstituted).
+      auto &SILMod = F.getModule();
+      auto DebugVarCanTy = DebugVarTy.getASTType()
+        ->replaceSubstitutedSILFunctionTypesWithUnsubstituted(SILMod)
+        ->getCanonicalType();
+      auto SSACanTy = SSAType.getObjectType().getASTType()
+        ->replaceSubstitutedSILFunctionTypesWithUnsubstituted(SILMod)
+        ->getCanonicalType();
+      require(DebugVarCanTy == SSACanTy,
               "debug type mismatch without a DIExpr");
     }
 

@@ -401,6 +401,7 @@ private extension AllocStackInst {
           use.set(to: Undef.get(type: type, context), context)
         } else {
           use.set(to: newAlloc, context)
+          dv.setDebugVarType(newAlloc.type)
         }
       default:
         use.set(to: newAlloc, context)

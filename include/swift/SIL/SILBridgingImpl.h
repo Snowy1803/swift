@@ -1990,6 +1990,9 @@ bool BridgedInstruction::DebugValue_hasVarInfo() const {
 BridgedSILDebugVariable BridgedInstruction::DebugValue_getVarInfo() const {
   return BridgedSILDebugVariable(getAs<swift::DebugValueInst>()->getVarInfo().value());
 }
+void BridgedInstruction::DebugValue_setDebugVarType(BridgedType type) const {
+  getAs<swift::DebugValueInst>()->setDebugVarType(type.unbridged());
+}
 
 bool BridgedInstruction::AllocStack_hasVarInfo() const {
   return getAs<swift::AllocStackInst>()->getVarInfo().has_value();

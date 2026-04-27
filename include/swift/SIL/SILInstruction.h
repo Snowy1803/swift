@@ -5701,6 +5701,11 @@ public:
       *getTrailingObjects<const SILDebugScope *>() = NewDS;
   }
 
+  void setDebugVarType(SILType NewTy) {
+    assert(HasAuxDebugVariableType && "DebugValueInst must always have a stored variable type");
+    *getTrailingObjects<SILType>() = NewTy;
+  }
+
   /// Whether the SSA value associated with the current debug_value
   /// instruction has an address type.
   bool hasAddrVal() const {

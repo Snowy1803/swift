@@ -650,6 +650,10 @@ final public class DebugValueInst : Instruction, UnaryInstruction, DebugVariable
   public var debugVariable: DebugVariable? {
     return bridged.DebugValue_hasVarInfo() ? bridged.DebugValue_getVarInfo() : nil
   }
+
+  public func setDebugVarType(_ type: Type) {
+    bridged.DebugValue_setDebugVarType(type.bridged)
+  }
 }
 
 final public class DebugStepInst : Instruction {}

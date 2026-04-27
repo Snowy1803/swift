@@ -986,6 +986,7 @@ struct BridgedInstruction {
 
   BRIDGED_INLINE bool DebugValue_hasVarInfo() const;
   BRIDGED_INLINE BridgedSILDebugVariable DebugValue_getVarInfo() const;
+  BRIDGED_INLINE void DebugValue_setDebugVarType(BridgedType type) const;
 
   BRIDGED_INLINE bool AllocStack_hasVarInfo() const;
   BRIDGED_INLINE BridgedSILDebugVariable AllocStack_getVarInfo() const;
