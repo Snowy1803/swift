@@ -405,9 +405,17 @@ private:
       break;
     }
     }
-    if (auto debugInfo = val.getDebugInfo())
+    if (auto debugInfo = val.getDebugInfo()) {
+      auto dv = debugInfo->second;
+      // The adjoint value lives in the tangent space, so its SIL type may
+      // differ from the original variable's type (e.g. Array<Float> →
+      // Array<Float>.DifferentiableView).  Clear the stored type so the
+      // debug_value inherits its type from the SSA operand.
+      dv.Type = {};
+      dv.DIExpr = {};
       builder.createDebugValue(
-          debugInfo->first.getLocation(), result, debugInfo->second);
+          debugInfo->first.getLocation(), result, dv);
+    }
     return result;
   }
 
