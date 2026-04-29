@@ -2204,7 +2204,12 @@ public:
     if (DVI->hasTrace())
       *this << "[trace] ";
     *this << getIDAndType(DVI->getOperand());
-    printDebugVar(DVI->getVarInfo(false),
+    auto Var = DVI->getVarInfo(false);
+    // Suppress the type when it matches the SSA operand's object type.
+    if (Var && Var->Type &&
+        *Var->Type == DVI->getOperand()->getType().getObjectType())
+      Var->Type = {};
+    printDebugVar(Var,
                   &DVI->getModule().getASTContext().SourceMgr);
   }
 
