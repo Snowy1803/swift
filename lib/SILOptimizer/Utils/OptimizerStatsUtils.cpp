@@ -289,6 +289,7 @@ llvm::cl::opt<std::string> StatsOnlyFunctionsNamePattern(
 struct FunctionStat {
   int BlockCount = 0;
   int InstCount = 0;
+  int UnreachableDebugVarCount = 0;
   /// Instruction counts per SILInstruction kind.
   InstructionCounts InstCounts;
 
@@ -771,6 +772,30 @@ bool functionHasInstructionInScope(SILFunction *F,
   return false;
 }
 
+/// Count debug_value instructions whose variable scope has no live
+/// (non-meta, non-unreachable) instructions in the function. These are
+/// unreachable from the debugger and waste memory.
+int computeUnreachableDebugVars(SILFunction *F) {
+  if (F->isTransparent())
+    return 0;
+
+  int Count = 0;
+  for (auto &BB : *F) {
+    for (auto &I : BB) {
+      DebugVarCarryingInst inst(&I);
+      if (!inst)
+        continue;
+      auto varInfo = inst.getVarInfo();
+      if (!varInfo)
+        continue;
+      auto *VarScope = varInfo->Scope ? varInfo->Scope : I.getDebugScope();
+      if (!functionHasInstructionInScope(F, VarScope))
+        Count++;
+    }
+  }
+  return Count;
+}
+
 int computeLostVariables(SILFunction *F, FunctionStat &Old, FunctionStat &New,
                          TransformationContext &Ctx) {
   // Transparent functions cannot be debugged. By definition, they are
@@ -852,7 +877,8 @@ void processFuncStatsChanges(SILFunction *F, FunctionStat &OldStat,
                              TransformationContext &Ctx) {
   processFuncStatHistory(F, NewStat, Ctx);
 
-  if (!SILStatsFunctions && !SILStatsLostVariables && !SILStatsDumpAll)
+  if (!SILStatsFunctions && !SILStatsLostVariables &&
+      !SILStatsDumpAll)
     return;
 
   if (OldStat == NewStat)
@@ -891,6 +917,13 @@ void processFuncStatsChanges(SILFunction *F, FunctionStat &OldStat,
   if ((SILStatsDumpAll || SILStatsLostVariables) && LostVariables) {
     stats_os() << nl.get();
     printCounterValue("function", "lostvars", LostVariables, F->getName(), Ctx);
+  }
+
+  if (SILStatsLostVariables &&
+      OldStat.UnreachableDebugVarCount != NewStat.UnreachableDebugVarCount) {
+    stats_os() << nl.get();
+    printCounterValue("function", "unreachable_debug_vars",
+                      NewStat.UnreachableDebugVarCount, F->getName(), Ctx);
   }
 }
 
@@ -1094,6 +1127,8 @@ FunctionStat::FunctionStat(SILFunction *F) {
   V.visitSILFunction(F);
   BlockCount = V.getBlockCount();
   InstCount = V.getInstCount();
+  if (SILStatsLostVariables)
+    UnreachableDebugVarCount = computeUnreachableDebugVars(F);
 }
 
 } // end anonymous namespace
