@@ -292,24 +292,48 @@ llvm::cl::opt<std::string> StatsOnlyFunctionsNamePattern(
     llvm::cl::desc(
         "Pattern of a function name, whose stats should be tracked"));
 
-/// How well a debug variable is described at a given point of the pipeline.
-/// A variable which does not exist at all in a function is not in its
-/// FunctionStat::DebugVariables map.
+/// How well a debug variable is described at a given point of the pipeline,
+/// ordered from the least to the most described: a variable was dropped by a
+/// transformation if its state went down.
 enum class DebugVarState : uint8_t {
-  /// Nothing about the variable is described by `undef`.
-  Live,
+  /// The function does not describe the variable at all anymore. Must stay
+  /// first: this is what `DebugVariables.lookup` returns for a variable which
+  /// is not in the map.
+  Lost,
+  /// Everything describing the variable is `undef`. The debugger reports it as
+  /// optimized out.
+  Killed,
   /// Some of the variable is described by `undef`: it is either reconstructed
   /// from an `undef`, or some of its fragments are `undef` while others are
   /// not. The debugger shows what is left of it.
   Partial,
-  /// Everything describing the variable is `undef`. The debugger reports it as
-  /// optimized out.
-  Killed,
+  /// Nothing about the variable is described by `undef`.
+  Live,
 };
+
+/// The states a variable can fall to, in the order they are reported.
+constexpr DebugVarState DroppedStates[] = {
+    DebugVarState::Lost, DebugVarState::Killed, DebugVarState::Partial};
+
+/// The name of the counter reporting the variables which fell to \p state.
+StringRef getDroppedCounterName(DebugVarState state) {
+  switch (state) {
+  case DebugVarState::Lost:
+    return "lostvars";
+  case DebugVarState::Killed:
+    return "killedvars";
+  case DebugVarState::Partial:
+    return "degradedvars";
+  case DebugVarState::Live:
+    llvm_unreachable("a live variable was not dropped");
+  }
+  llvm_unreachable("covered switch");
+}
 
 /// Combines the states of two instructions describing the same variable.
 /// A variable is only as good as the best description of it, but it is only
-/// fully live when nothing about it was lost.
+/// fully live when nothing about it was lost. Neither state can be Lost: an
+/// instruction describing the variable is what puts it in the map.
 DebugVarState mergeDebugVarStates(DebugVarState lhs, DebugVarState rhs) {
   if (lhs == rhs)
     return lhs;
@@ -339,30 +363,14 @@ struct FunctionStat {
   FunctionStat &operator=(const FunctionStat &) = delete;
   FunctionStat &operator=(FunctionStat &&) = default;
 
-  /// Returns the state of \p Var, or nothing if the function does not describe
-  /// it anymore.
-  std::optional<DebugVarState> getDebugVarState(const VarID &Var) const {
-    auto it = DebugVariables.find(Var);
-    if (it == DebugVariables.end())
-      return std::nullopt;
-    return it->second;
-  }
-
   void print(llvm::raw_ostream &stream) const {
     stream << "FunctionStat("
            << "blocks = " << BlockCount << ", Inst = " << InstCount << ")\n";
   }
 
   bool operator==(const FunctionStat &rhs) const {
-    if (BlockCount != rhs.BlockCount || InstCount != rhs.InstCount)
-      return false;
-    if (DebugVariables.size() != rhs.DebugVariables.size())
-      return false;
-    for (auto &Var : DebugVariables) {
-      if (rhs.getDebugVarState(Var.first) != Var.second)
-        return false;
-    }
-    return true;
+    return BlockCount == rhs.BlockCount && InstCount == rhs.InstCount
+      && DebugVariables == rhs.DebugVariables;
   }
 
   bool operator!=(const FunctionStat &rhs) const { return !(*this == rhs); }
@@ -945,16 +953,15 @@ bool functionHasInstructionInScope(SILFunction *F,
   return false;
 }
 
-/// The debug variables a transformation degraded.
+/// The number of debug variables a transformation dropped, per state they fell
+/// to.
 struct DroppedVariables {
-  /// The number of variables which aren't described at all anymore.
-  int Lost = 0;
-  /// The number of variables which lost their last location, and now read as
-  /// optimized out.
-  int Killed = 0;
-  /// The number of variables which lost a part of their description, but are
-  /// still partially readable.
-  int Degraded = 0;
+  int Counts[std::size(DroppedStates)] = {};
+
+  int &operator[](DebugVarState state) {
+    ASSERT(state != DebugVarState::Live && "a live variable was not dropped");
+    return Counts[(unsigned)state];
+  }
 };
 
 DroppedVariables computeDroppedVariables(SILFunction *F, FunctionStat &Old,
@@ -970,33 +977,21 @@ DroppedVariables computeDroppedVariables(SILFunction *F, FunctionStat &Old,
   bool ReportKilled = SILStatsKilledVariables || SILStatsDumpAll;
 
   DroppedVariables Dropped;
-  for (auto &Entry : Old.DebugVariables) {
-    const FunctionStat::VarID &Var = Entry.first;
-    DebugVarState OldState = Entry.second;
-    std::optional<DebugVarState> NewState = New.getDebugVarState(Var);
-
-    // A variable is lost when it is gone from the function, killed when the
-    // last of its description becomes `undef`, and degraded when only a part
-    // of it is lost. A variable which was already degraded is not reported
-    // again, as there is no telling how much more of it was lost.
-    bool Lost = !NewState;
-    bool Killed = !Lost && *NewState == DebugVarState::Killed &&
-                  OldState != DebugVarState::Killed;
-    bool Degraded = !Lost && *NewState == DebugVarState::Partial &&
-                    OldState == DebugVarState::Live;
-    if (!(Lost && ReportLost) && !((Killed || Degraded) && ReportKilled))
+  for (auto &[Var, OldState] : Old.DebugVariables) {
+    // A variable is dropped when it describes less than it used to, and is
+    // reported against the state it fell to. One which was already partial is
+    // not reported again, as there is no telling how much more of it was lost.
+    DebugVarState NewState = New.DebugVariables.lookup(Var);
+    if (NewState >= OldState)
+      continue;
+    if (!(NewState == DebugVarState::Lost ? ReportLost : ReportKilled))
       continue;
     if (!functionHasInstructionInScope(F, std::get<0>(Var)))
       continue;
     // Found another instruction in the variable's scope, so there exists a
     // break point at which the variable could be observed. Count it as
     // dropped.
-    if (Lost)
-      ++Dropped.Lost;
-    else if (Killed)
-      ++Dropped.Killed;
-    else
-      ++Dropped.Degraded;
+    ++Dropped[NewState];
     LLVM_DEBUG(
         unsigned line = 0, col = 0;
         if (std::get<2>(Var).isValid())
@@ -1005,10 +1000,9 @@ DroppedVariables computeDroppedVariables(SILFunction *F, FunctionStat &Old,
                   std::get<2>(Var), 0);
         llvm::dbgs() << Ctx.getStageName() << ": " << Ctx.getTransformId()
                      << Ctx.getSubpassLabel() << ": "
-                     << (Lost ? "Lost" : Killed ? "Killed" : "Degraded")
-                     << " Variable: " << std::get<1>(Var) << " line " << line
-                     << " col " << col << " in function " << F->getName()
-                     << " in scope ";
+                     << getDroppedCounterName(NewState) << ": "
+                     << std::get<1>(Var) << " line " << line << " col " << col
+                     << " in function " << F->getName() << " in scope ";
         std::get<0>(Var)->print(F->getASTContext().SourceMgr, llvm::dbgs()));
   }
   return Dropped;
@@ -1107,21 +1101,12 @@ void processFuncStatsChanges(SILFunction *F, FunctionStat &OldStat,
                        NewStat.InstCount, Ctx, F->getName());
   }
 
-  if (Dropped.Lost) {
-    stats_os() << nl.get();
-    printCounterValue("function", "lostvars", Dropped.Lost, F->getName(), Ctx);
-  }
-
-  if (Dropped.Killed) {
-    stats_os() << nl.get();
-    printCounterValue("function", "killedvars", Dropped.Killed, F->getName(),
-                      Ctx);
-  }
-
-  if (Dropped.Degraded) {
-    stats_os() << nl.get();
-    printCounterValue("function", "degradedvars", Dropped.Degraded,
-                      F->getName(), Ctx);
+  for (DebugVarState State : DroppedStates) {
+    if (int Count = Dropped[State]) {
+      stats_os() << nl.get();
+      printCounterValue("function", getDroppedCounterName(State), Count,
+                        F->getName(), Ctx);
+    }
   }
 }
 
@@ -1347,15 +1332,11 @@ void OptimizerStatsAnalysis::reportSubpassStats(SILFunction *F,
   SubpassCtx.setSubpass(CurrentSubpass.Label, CurrentSubpass.Number);
   DroppedVariables Dropped =
       computeDroppedVariables(F, Stat, NewStat, SubpassCtx);
-  if (Dropped.Lost)
-    printCounterValue("function", "lostvars", Dropped.Lost, F->getName(),
-                      SubpassCtx);
-  if (Dropped.Killed)
-    printCounterValue("function", "killedvars", Dropped.Killed, F->getName(),
-                      SubpassCtx);
-  if (Dropped.Degraded)
-    printCounterValue("function", "degradedvars", Dropped.Degraded,
-                      F->getName(), SubpassCtx);
+  for (DebugVarState State : DroppedStates) {
+    if (int Count = Dropped[State])
+      printCounterValue("function", getDroppedCounterName(State), Count,
+                        F->getName(), SubpassCtx);
+  }
 
   // Only update the debug variables statistics.
   Stat.VarNames = std::move(NewStat.VarNames);
