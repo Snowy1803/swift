@@ -1,0 +1,53 @@
+// RUN: %target-sil-opt --dce --copy-propagation -o /dev/null %s -sil-stats-killed-variables 2>&1 | %FileCheck %s --check-prefixes=PASS,CHECK
+// RUN: %target-sil-opt --dce --copy-propagation -o /dev/null %s -sil-stats-killed-variables -sil-stats-subpass 2>&1 | %FileCheck %s --check-prefixes=SUBPASS,CHECK
+// RUN: %target-sil-opt --dce --copy-propagation -o /dev/null %s -sil-stats-lost-variables 2>&1 | %FileCheck %s --allow-empty --check-prefix=NONE
+// RUN: %target-sil-opt --dce --copy-propagation -o /dev/null %s 2>&1 | %FileCheck %s --allow-empty --check-prefix=NONE
+
+// CopyPropagation shortens the lifetime of the value describing "x", which
+// leaves the variable behind as a `debug_value undef`: it is killed, not lost.
+
+// DCE runs first, as OptimizerStats only run after a pass, so there is no
+// baseline for the first pass.
+
+sil_stage canonical
+
+import Builtin
+import Swift
+
+class C {}
+
+sil_scope 1 { loc "file.swift":1:6 parent @foo : $@convention(thin) (@inout C) -> () }
+
+sil @getC : $@convention(thin) () -> (@owned C)
+
+// The variable is attributed to the whole pass.
+// PASS: function, killedvars, {{.*}}, CopyPropagation, 3, 1, {{[0-9]+}}, foo
+
+// One row per subpass instead, numbered <pass number>.<subpass number>.
+// SUBPASS: function, killedvars, {{.*}}, CopyPropagation apply, 3.0, 1, {{[0-9]+}}, foo
+
+// A killed variable is not counted as lost, and nothing else is dropped.
+// CHECK-NOT: lostvars
+// CHECK-NOT: killedvars
+
+// Neither counter is reported when it is not asked for.
+// NONE-NOT: vars
+
+// DCE needs a function to run on before foo, to establish the baseline.
+sil private [ossa] @other : $@convention(thin) () -> () {
+bb0:
+  %v = tuple ()
+  return %v : $()
+}
+
+sil private [ossa] @foo : $@convention(thin) (@inout C) -> () {
+bb0(%addr : $*C):
+  %f = function_ref @getC : $@convention(thin) () -> (@owned C), loc "file.swift":2:5, scope 1
+  %arg = apply %f() : $@convention(thin) () -> (@owned C), loc "file.swift":2:5, scope 1
+  %copy = copy_value %arg : $C, loc "file.swift":2:5, scope 1
+  store %copy to [assign] %addr : $*C, loc "file.swift":3:5, scope 1
+  debug_value %arg : $C, let, name "x", loc "file.swift":4:5, scope 1
+  destroy_value %arg : $C, loc "file.swift":5:5, scope 1
+  %v = tuple (), loc "file.swift":6:5, scope 1
+  return %v : $(), loc "file.swift":6:5, scope 1
+} // end sil function 'foo'

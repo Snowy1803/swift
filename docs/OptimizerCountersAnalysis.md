@@ -54,8 +54,8 @@ The following statistics can be recorded:
 
   * For SILFunctions: the number of SIL basic blocks for each SILFunction, the
     number of SIL instructions, the number of SILInstructions of a specific
-    kind (e.g. a number of alloc_ref instructions), the number of debug
-    variables
+    kind (e.g. a number of alloc_ref instructions), the number of lost and
+    killed debug variables
 
   * For SILModules: the number of SIL basic blocks in the SILModule, the number
     of SIL instructions, the number of SILFunctions, the number of
@@ -129,6 +129,18 @@ not track the number of debug variables: it counts the number of debug variables
 that were present, but aren't anymore. If a variable changes location or scope,
 which is not allowed, it will be counted as lost.
 
+The killed debug variables counter works the same way, and is enabled by using
+the `-Xllvm -sil-stats-killed-variables` command-line option. Instead of the
+variables a pass removed, it counts the variables a pass downgraded: the ones
+which had a location, and are now only described by `undef`, which the debugger
+reports as optimized out. A variable which disappeared entirely is lost, not
+killed: the two counters never count the same variable twice.
+
+A variable is considered to have a location as long as one of the instructions
+describing it has one, as the others may only describe a fragment of it. An
+allocation always locates its variable, and so does a `debug_value` with a
+reconstruction block and no operand, which describes a constant.
+
 ### Subpass level counters
 Passes which transform one instruction or value at a time report each of those
 steps as a subpass, through `SILPassManager::continueWithNextSubpassRun`. The
@@ -139,11 +151,11 @@ loses debug variables on, as it will be included in the pass name (e.g.:
 `SILCombine alloc_stack`).
 
 The option does not enable any counter by itself, it only changes what they are
-attributed to: `-Xllvm -sil-stats-lost-variables` is needed as well, as lost
-debug variables are the only counter attributed to subpasses so far. Passes
-which do not report subpasses are unaffected, and what a pass does outside of
-its subpasses is still attributed to the pass itself.
-
+attributed to: `-Xllvm -sil-stats-lost-variables` or `-Xllvm
+-sil-stats-killed-variables` is needed as well, as dropped debug variables are
+the only counters attributed to subpasses so far. Passes which do not report
+subpasses are unaffected, and what a pass does outside of its subpasses is
+still attributed to the pass itself.
 
 Note that this is more expensive than the pass level counters: the debug
 variables of a function are recomputed after every subpass during which an
@@ -218,8 +230,8 @@ And for counter stats it looks like this:
     counters collection, when changes to the SILFunction counters are logged 
     unconditionally, without any on-line filtering.
 * `CounterName` is typically one of `block`, `inst`, `function`, `memory`,
-   `lostvars`, or `inst_instruction_name` if you collect counters for specific
-   kinds of SIL instructions.
+   `lostvars`, `killedvars`, or `inst_instruction_name` if you collect counters
+   for specific kinds of SIL instructions.
 * `Symbol` is e.g. the name of a function
 * `StageName` is the name of the current optimizer pipeline stage
 * `TransformName` is the name of the current optimizer transformation/pass. The
@@ -235,11 +247,11 @@ And for counter stats it looks like this:
    applies to the subpass number, so a counter recorded at `4390.7` is
    reproduced with `-Xllvm -sil-opt-pass-count -Xllvm 4391.8`
 
-## Extract Lost Variables per Pass
+## Extract Lost and Killed Variables per Pass
 
-For lost variables, there is a script to output a CSV with only the amount of
-lost variables per pass. You can then easily open the resulting CSV in Numbers
-to make graphs.
+For dropped variables, there is a script to output a CSV with only the amount of
+lost and killed variables per pass. You can then easily open the resulting CSV in
+Numbers to make graphs.
 
 `utils/process-stats-lost-variables csv_file_with_counters > csv_aggregate`
 
