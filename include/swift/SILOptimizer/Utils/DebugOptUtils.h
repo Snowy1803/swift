@@ -24,6 +24,17 @@
 
 namespace swift {
 
+class SILPassManager;
+
+/// Simplifies the content of the debug reconstruction blocks of \p f, so that
+/// a block which reconstructs nothing but `undef` returns `undef` literally.
+/// This is what tells a variable which was optimized away from one which is
+/// only partially described.
+///
+/// Operand lists are left alone, as the debug values must not be replaced: this
+/// may run while a pass which holds references to them is in flight.
+void simplifyDebugReconstructionBlocks(SILPassManager *pm, SILFunction *f);
+
 
 /// Salvages the debug uses of any result of \p inst, then deletes whatever
 /// could not be salvaged.

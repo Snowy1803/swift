@@ -143,6 +143,8 @@ struct BridgedOptimizerUtilities {
   static void registerLifetimeCompletion(UpdateLifetimeFunctionFn completeAllLifetimesFn,
                                          UpdateLifetimeValuesFn completeLifetimeFn);
   static void registerControlFlowUtils(UpdateFunctionFn breakInfiniteLoopsFn);
+  static void registerDebugReconstructionSimplification(
+      UpdateFunctionFn simplifyDebugReconstructionBlocksFn);
 };
 
 struct BridgedLoopTree {

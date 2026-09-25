@@ -99,7 +99,7 @@ def addStatsFromInput(inputFile, db):
         # Trim all values
         segments = list(map(str.strip, segments))
         if segments[0] == 'function_history' or segments[1] in [
-                'lostvars', 'killedvars']:
+                'lostvars', 'killedvars', 'degradedvars']:
             # Process history records
             delta = 0.0
             (kind, counter, stage, transform, passnum,

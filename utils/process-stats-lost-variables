@@ -11,7 +11,7 @@
 BEGIN {
   FS = ", "
   OFS = ", "
-  print "Pass Name", "Lost Variables", "Killed Variables"
+  print "Pass Name", "Lost Variables", "Killed Variables", "Degraded Variables"
 }
 
 $1 == "function" && $2 == "lostvars" {
@@ -24,7 +24,12 @@ $1 == "function" && $2 == "killedvars" {
   passes[$4] = 1
 }
 
+$1 == "function" && $2 == "degradedvars" {
+  degraded[$4] += $6
+  passes[$4] = 1
+}
+
 END {
   for (i in passes)
-    print i, lost[i] + 0, killed[i] + 0
+    print i, lost[i] + 0, killed[i] + 0, degraded[i] + 0
 }

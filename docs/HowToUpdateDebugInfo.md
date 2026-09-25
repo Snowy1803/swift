@@ -273,7 +273,8 @@ will also update debug values to use the new instruction.
 > [!Tip]
 > To detect when a pass drops a variable, you can use the
 > `-Xllvm -sil-stats-lost-variables` to print when a variable is lost by a pass.
-> Losing the location of a variable, which then reads as optimized out, is
-> reported by `-Xllvm -sil-stats-killed-variables` instead.
+> A variable which is still there but lost its location, and now reads as
+> optimized out, is reported by `-Xllvm -sil-stats-killed-variables` instead,
+> which also reports the ones which only lost a part of their location.
 > More information about these options is available in
 > [Optimizer Counter Analysis](OptimizerCountersAnalysis.md)

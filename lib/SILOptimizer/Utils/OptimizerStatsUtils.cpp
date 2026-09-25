@@ -77,6 +77,7 @@
 #include "swift/SILOptimizer/Analysis/Analysis.h"
 #include "swift/SILOptimizer/PassManager/PassManager.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
+#include "swift/SILOptimizer/Utils/DebugOptUtils.h"
 #include "swift/SILOptimizer/Utils/OptimizerStatsUtils.h"
 
 #define DEBUG_TYPE "optimizer-stats"
@@ -291,6 +292,32 @@ llvm::cl::opt<std::string> StatsOnlyFunctionsNamePattern(
     llvm::cl::desc(
         "Pattern of a function name, whose stats should be tracked"));
 
+/// How well a debug variable is described at a given point of the pipeline.
+/// A variable which does not exist at all in a function is not in its
+/// FunctionStat::DebugVariables map.
+enum class DebugVarState : uint8_t {
+  /// Nothing about the variable is described by `undef`.
+  Live,
+  /// Some of the variable is described by `undef`: it is either reconstructed
+  /// from an `undef`, or some of its fragments are `undef` while others are
+  /// not. The debugger shows what is left of it.
+  Partial,
+  /// Everything describing the variable is `undef`. The debugger reports it as
+  /// optimized out.
+  Killed,
+};
+
+/// Combines the states of two instructions describing the same variable.
+/// A variable is only as good as the best description of it, but it is only
+/// fully live when nothing about it was lost.
+DebugVarState mergeDebugVarStates(DebugVarState lhs, DebugVarState rhs) {
+  if (lhs == rhs)
+    return lhs;
+  // One is Partial, or one is Live and the other Killed: either way, only part
+  // of the variable is described.
+  return DebugVarState::Partial;
+}
+
 /// Stats for a SIL function.
 struct FunctionStat {
   int BlockCount = 0;
@@ -300,20 +327,26 @@ struct FunctionStat {
 
   using VarID = std::tuple<const SILDebugScope *, llvm::StringRef, SourceLoc>;
   llvm::StringSet<> VarNames;
-  llvm::DenseSet<FunctionStat::VarID> DebugVariables;
-  /// The subset of DebugVariables which still has a location, i.e. which is
-  /// described by something else than `undef`.
-  llvm::DenseSet<FunctionStat::VarID> LocatedDebugVariables;
+  llvm::DenseMap<FunctionStat::VarID, DebugVarState> DebugVariables;
   llvm::DenseSet<const SILDebugScope *> VisitedScope;
 
   FunctionStat(SILFunction *F);
   FunctionStat() {}
 
-  // The DebugVariables set contains pointers to VarNames. Disallow copy.
+  // The DebugVariables map contains pointers to VarNames. Disallow copy.
   FunctionStat(const FunctionStat &) = delete;
   FunctionStat(FunctionStat &&) = default;
   FunctionStat &operator=(const FunctionStat &) = delete;
   FunctionStat &operator=(FunctionStat &&) = default;
+
+  /// Returns the state of \p Var, or nothing if the function does not describe
+  /// it anymore.
+  std::optional<DebugVarState> getDebugVarState(const VarID &Var) const {
+    auto it = DebugVariables.find(Var);
+    if (it == DebugVariables.end())
+      return std::nullopt;
+    return it->second;
+  }
 
   void print(llvm::raw_ostream &stream) const {
     stream << "FunctionStat("
@@ -321,9 +354,15 @@ struct FunctionStat {
   }
 
   bool operator==(const FunctionStat &rhs) const {
-    return BlockCount == rhs.BlockCount && InstCount == rhs.InstCount
-      && DebugVariables == rhs.DebugVariables
-      && LocatedDebugVariables == rhs.LocatedDebugVariables;
+    if (BlockCount != rhs.BlockCount || InstCount != rhs.InstCount)
+      return false;
+    if (DebugVariables.size() != rhs.DebugVariables.size())
+      return false;
+    for (auto &Var : DebugVariables) {
+      if (rhs.getDebugVarState(Var.first) != Var.second)
+        return false;
+    }
+    return true;
   }
 
   bool operator!=(const FunctionStat &rhs) const { return !(*this == rhs); }
@@ -408,19 +447,38 @@ bool shouldTrackDebugVariables() {
   return SILStatsLostVariables || SILStatsKilledVariables;
 }
 
-/// True if \p inst gives a location to its debug variable, as opposed to
-/// describing it as optimized away.
-bool hasDebugVariableLocation(SILInstruction *inst) {
+/// Returns how well \p inst describes its debug variable.
+///
+/// The debug reconstruction blocks must have been simplified (see
+/// `simplifyDebugReconstructionBlocks`): this reads the state off the IR rather
+/// than folding `undef` itself.
+DebugVarState computeDebugVarState(SILInstruction *inst) {
   auto *debugValue = dyn_cast<DebugValueInst>(inst);
   // An allocation always locates its variable.
   if (!debugValue)
-    return true;
-  // Without any operand, the reconstruction block produces a constant.
-  if (debugValue->getAllOperands().empty())
-    return true;
-  return llvm::any_of(debugValue->getAllOperands(), [](const Operand &op) {
-    return !isa<SILUndef>(op.get());
-  });
+    return DebugVarState::Live;
+
+  SILBasicBlock *debugBB = debugValue->getDebugReconstructionBlock();
+  if (!debugBB)
+    return isa<SILUndef>(debugValue->getSingleOperand()) ? DebugVarState::Killed
+                                                         : DebugVarState::Live;
+
+  // The variable is whatever the reconstruction block returns.
+  auto *ret = cast<ReturnInst>(debugBB->getTerminator());
+  if (isa<SILUndef>(ret->getOperand()))
+    return DebugVarState::Killed;
+
+  // The reconstruction is only dead code away from what the debugger shows, so
+  // any remaining `undef` is a part of the variable which was lost. An `undef`
+  // operand of the debug value itself does not count: its block argument is
+  // unused, as killing an operand propagates the `undef` into the block.
+  for (SILInstruction &debugInst : *debugBB) {
+    for (Operand &op : debugInst.getAllOperands()) {
+      if (isa<SILUndef>(op.get()))
+        return DebugVarState::Partial;
+    }
+  }
+  return DebugVarState::Live;
 }
 
 /// A helper type to collect the stats about a function (instructions, blocks,
@@ -431,16 +489,13 @@ struct InstCountVisitor : SILInstructionVisitor<InstCountVisitor> {
   InstructionCounts &InstCounts;
 
   llvm::StringSet<> &VarNames;
-  llvm::DenseSet<FunctionStat::VarID> &DebugVariables;
-  llvm::DenseSet<FunctionStat::VarID> &LocatedDebugVariables;
+  llvm::DenseMap<FunctionStat::VarID, DebugVarState> &DebugVariables;
 
   InstCountVisitor(
       InstructionCounts &InstCounts, llvm::StringSet<> &VarNames,
-      llvm::DenseSet<FunctionStat::VarID> &DebugVariables,
-      llvm::DenseSet<FunctionStat::VarID> &LocatedDebugVariables)
+      llvm::DenseMap<FunctionStat::VarID, DebugVarState> &DebugVariables)
       : InstCounts(InstCounts), VarNames(VarNames),
-        DebugVariables(DebugVariables),
-        LocatedDebugVariables(LocatedDebugVariables) {}
+        DebugVariables(DebugVariables) {}
 
   int getBlockCount() const {
     return BlockCount;
@@ -476,11 +531,13 @@ struct InstCountVisitor : SILInstructionVisitor<InstCountVisitor> {
     FunctionStat::VarID key(
               varInfo->Scope ? varInfo->Scope : inst->getDebugScope(),
               UniqueName, loc);
-    DebugVariables.insert(key);
-    // A variable is located as soon as one of the instructions describing it
-    // has a location: the others may only describe a fragment of it.
-    if (hasDebugVariableLocation(I))
-      LocatedDebugVariables.insert(key);
+    // Several instructions can describe the same variable, each of them a
+    // fragment of it or a new value for it.
+    DebugVarState state = computeDebugVarState(I);
+    auto inserted = DebugVariables.try_emplace(key, state);
+    if (!inserted.second)
+      inserted.first->second =
+          mergeDebugVarStates(inserted.first->second, state);
   }
 };
 
@@ -892,8 +949,12 @@ bool functionHasInstructionInScope(SILFunction *F,
 struct DroppedVariables {
   /// The number of variables which aren't described at all anymore.
   int Lost = 0;
-  /// The number of variables which are still described, but only by `undef`.
+  /// The number of variables which lost their last location, and now read as
+  /// optimized out.
   int Killed = 0;
+  /// The number of variables which lost a part of their description, but are
+  /// still partially readable.
+  int Degraded = 0;
 };
 
 DroppedVariables computeDroppedVariables(SILFunction *F, FunctionStat &Old,
@@ -909,20 +970,33 @@ DroppedVariables computeDroppedVariables(SILFunction *F, FunctionStat &Old,
   bool ReportKilled = SILStatsKilledVariables || SILStatsDumpAll;
 
   DroppedVariables Dropped;
-  for (auto &Var : Old.DebugVariables) {
-    // A variable which is gone is lost. One which is still there, but lost its
-    // location on the way, is killed.
-    bool Lost = !New.DebugVariables.contains(Var);
-    bool Killed = !Lost && Old.LocatedDebugVariables.contains(Var) &&
-                  !New.LocatedDebugVariables.contains(Var);
-    if (!(Lost && ReportLost) && !(Killed && ReportKilled))
+  for (auto &Entry : Old.DebugVariables) {
+    const FunctionStat::VarID &Var = Entry.first;
+    DebugVarState OldState = Entry.second;
+    std::optional<DebugVarState> NewState = New.getDebugVarState(Var);
+
+    // A variable is lost when it is gone from the function, killed when the
+    // last of its description becomes `undef`, and degraded when only a part
+    // of it is lost. A variable which was already degraded is not reported
+    // again, as there is no telling how much more of it was lost.
+    bool Lost = !NewState;
+    bool Killed = !Lost && *NewState == DebugVarState::Killed &&
+                  OldState != DebugVarState::Killed;
+    bool Degraded = !Lost && *NewState == DebugVarState::Partial &&
+                    OldState == DebugVarState::Live;
+    if (!(Lost && ReportLost) && !((Killed || Degraded) && ReportKilled))
       continue;
     if (!functionHasInstructionInScope(F, std::get<0>(Var)))
       continue;
     // Found another instruction in the variable's scope, so there exists a
     // break point at which the variable could be observed. Count it as
     // dropped.
-    ++(Lost ? Dropped.Lost : Dropped.Killed);
+    if (Lost)
+      ++Dropped.Lost;
+    else if (Killed)
+      ++Dropped.Killed;
+    else
+      ++Dropped.Degraded;
     LLVM_DEBUG(
         unsigned line = 0, col = 0;
         if (std::get<2>(Var).isValid())
@@ -931,13 +1005,24 @@ DroppedVariables computeDroppedVariables(SILFunction *F, FunctionStat &Old,
                   std::get<2>(Var), 0);
         llvm::dbgs() << Ctx.getStageName() << ": " << Ctx.getTransformId()
                      << Ctx.getSubpassLabel() << ": "
-                     << (Lost ? "Lost" : "Killed")
+                     << (Lost ? "Lost" : Killed ? "Killed" : "Degraded")
                      << " Variable: " << std::get<1>(Var) << " line " << line
                      << " col " << col << " in function " << F->getName()
                      << " in scope ";
         std::get<0>(Var)->print(F->getASTContext().SourceMgr, llvm::dbgs()));
   }
   return Dropped;
+}
+
+/// Gathers the statistics of \p F.
+///
+/// The debug reconstruction blocks are canonicalized first: the state of a
+/// debug variable is read off the IR, so an `undef` must have been folded
+/// through the reconstruction before it can be told apart from a value.
+FunctionStat computeFunctionStat(SILFunction *F, TransformationContext &Ctx) {
+  if (SILStatsKilledVariables)
+    simplifyDebugReconstructionBlocks(&Ctx.getPassManager(), F);
+  return FunctionStat(F);
 }
 
 /// Dump statistics for a SILFunction. It is only used if a user asked to
@@ -1031,6 +1116,12 @@ void processFuncStatsChanges(SILFunction *F, FunctionStat &OldStat,
     stats_os() << nl.get();
     printCounterValue("function", "killedvars", Dropped.Killed, F->getName(),
                       Ctx);
+  }
+
+  if (Dropped.Degraded) {
+    stats_os() << nl.get();
+    printCounterValue("function", "degradedvars", Dropped.Degraded,
+                      F->getName(), Ctx);
   }
 }
 
@@ -1153,7 +1244,7 @@ void OptimizerStatsAnalysis::updateModuleStats(TransformationContext &Ctx) {
     // Iterate over all functions in the module and compute the stats.
     for (auto &F : M) {
       auto &FuncStat = getFunctionStat(&F);
-      FunctionStat NewFuncStat(&F);
+      FunctionStat NewFuncStat = computeFunctionStat(&F, Ctx);
       processFuncStatHistory(&F, NewFuncStat, Ctx);
       // Update module stats.
       NewModStat.addFunctionStat(NewFuncStat);
@@ -1182,7 +1273,7 @@ void OptimizerStatsAnalysis::updateModuleStats(TransformationContext &Ctx) {
       InvalidatedFuncs.pop_back();
       auto &FuncStat = getFunctionStat(F);
       auto &OldFuncStat = FuncStat;
-      FunctionStat NewFuncStat(F);
+      FunctionStat NewFuncStat = computeFunctionStat(F, Ctx);
       processFuncStatsChanges(F, OldFuncStat, NewFuncStat, Ctx);
       NewModStat.subFunctionStat(OldFuncStat);
       NewModStat.addFunctionStat(NewFuncStat);
@@ -1207,7 +1298,7 @@ void OptimizerStatsAnalysis::updateModuleStats(TransformationContext &Ctx) {
       AddedFuncs.pop_back();
       auto &FuncStat = getFunctionStat(F);
       FunctionStat OldFuncStat;
-      FunctionStat NewFuncStat(F);
+      FunctionStat NewFuncStat = computeFunctionStat(F, Ctx);
       processFuncStatsChanges(F, OldFuncStat, NewFuncStat, Ctx);
       NewModStat.addFunctionStat(NewFuncStat);
       FuncStat = std::move(NewFuncStat);
@@ -1230,8 +1321,7 @@ void OptimizerStatsAnalysis::updateModuleStats(TransformationContext &Ctx) {
 }
 
 FunctionStat::FunctionStat(SILFunction *F) {
-  InstCountVisitor V(InstCounts, VarNames, DebugVariables,
-                     LocatedDebugVariables);
+  InstCountVisitor V(InstCounts, VarNames, DebugVariables);
   V.visitSILFunction(F);
   BlockCount = V.getBlockCount();
   InstCount = V.getInstCount();
@@ -1251,7 +1341,7 @@ void OptimizerStatsAnalysis::reportSubpassStats(SILFunction *F,
   if (CurrentSubpass.ChangeCount == ChangeCount)
     return;
 
-  FunctionStat NewStat(F);
+  FunctionStat NewStat = computeFunctionStat(F, Ctx);
   // Report the statistics against the current subpass, not the new one.
   TransformationContext SubpassCtx = Ctx;
   SubpassCtx.setSubpass(CurrentSubpass.Label, CurrentSubpass.Number);
@@ -1263,12 +1353,16 @@ void OptimizerStatsAnalysis::reportSubpassStats(SILFunction *F,
   if (Dropped.Killed)
     printCounterValue("function", "killedvars", Dropped.Killed, F->getName(),
                       SubpassCtx);
+  if (Dropped.Degraded)
+    printCounterValue("function", "degradedvars", Dropped.Degraded,
+                      F->getName(), SubpassCtx);
 
   // Only update the debug variables statistics.
   Stat.VarNames = std::move(NewStat.VarNames);
   Stat.DebugVariables = std::move(NewStat.DebugVariables);
-  Stat.LocatedDebugVariables = std::move(NewStat.LocatedDebugVariables);
-  CurrentSubpass.ChangeCount = ChangeCount;
+  // Re-read the count, as canonicalizing the debug reconstruction blocks
+  // changes instructions too.
+  CurrentSubpass.ChangeCount = getInstructionChangeCount(F->getModule());
 }
 
 void OptimizerStatsAnalysis::startSubpass(SILFunction *F, StringRef Label,

@@ -34,6 +34,7 @@
 #include "swift/SILOptimizer/Analysis/DominanceAnalysis.h"
 #include "swift/SILOptimizer/Analysis/DestructorAnalysis.h"
 #include "swift/SILOptimizer/OptimizerBridging.h"
+#include "swift/SILOptimizer/PassManager/PassManager.h"
 #include "swift/SILOptimizer/Utils/CFGOptUtils.h"
 #include "swift/SILOptimizer/Utils/ConstantFolding.h"
 #include "swift/SILOptimizer/Utils/DebugOptUtils.h"
@@ -2924,4 +2925,29 @@ bool swift::shouldRemoveCondFail(StringRef withMessage, StringRef functionName) 
 
   // Check whether the cond_fail's message was listed in the config file.
   return CondFailsToRemove.find(withMessage.str()) != CondFailsToRemove.end();
+}
+
+//===----------------------------------------------------------------------===//
+//                              Swift Bridging
+//===----------------------------------------------------------------------===//
+
+static BridgedOptimizerUtilities::UpdateFunctionFn
+    simplifyDebugReconstructionBlocksFunction;
+
+void BridgedOptimizerUtilities::registerDebugReconstructionSimplification(
+    UpdateFunctionFn simplifyDebugReconstructionBlocksFn) {
+  simplifyDebugReconstructionBlocksFunction =
+      simplifyDebugReconstructionBlocksFn;
+}
+
+void swift::simplifyDebugReconstructionBlocks(SILPassManager *pm,
+                                              SILFunction *f) {
+  if (!simplifyDebugReconstructionBlocksFunction)
+    return;
+  // Run on an invocation of its own, so that the change notifications are
+  // dropped with it: debug reconstruction blocks are not part of the function,
+  // so nothing an analysis knows about changes. This also keeps the erased
+  // instructions out of the worklist of a pass which may be running.
+  SwiftPassInvocation invocation(pm, /*transform=*/nullptr, f);
+  simplifyDebugReconstructionBlocksFunction({&invocation}, {f});
 }

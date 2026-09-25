@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import SIL
+import OptimizerBridging
 
 //===--------------------------------------------------------------------===//
 //                        Instruction protocols
@@ -99,7 +100,7 @@ let lateOnoneSimplificationPass = FunctionPass(name: "late-onone-simplification"
 
 let debugReconstructionBlockSimplificationPass = FunctionPass(name: "debug-reconstruction-block-simplification") {
   (function: Function, context: FunctionPassContext) in
-  runDebugReconstructionBlockSimplification(on: function, context)
+  simplifyDebugReconstructionBlocks(in: function, context, canonicalizeOperands: true, useSubpasses: true)
 }
 
 //===--------------------------------------------------------------------===//
@@ -187,7 +188,20 @@ private func cleanupDeadBlocks(in function: Function,
 //          Debug Reconstruction Block Simplification
 //===--------------------------------------------------------------------===//
 
-private func runDebugReconstructionBlockSimplification(on function: Function, _ context: FunctionPassContext) {
+/// Simplifies the content of every debug reconstruction block of `function`, so that a block
+/// which reconstructs nothing but `undef` returns `undef` literally, and an `undef` which the
+/// reconstruction does not depend on leaves no trace. This is what makes it possible to tell
+/// a variable which is optimized away from one which is only partially described.
+///
+/// With `canonicalizeOperands`, dead operands are dropped and a reconstruction block which
+/// does nothing is removed. Both replace the debug value with a new instruction, so a caller
+/// which runs while another pass is in flight must pass `false`: that pass may hold a
+/// reference to the debug value.
+///
+/// `useSubpasses` reports each step as a subpass. It must be false when this does not run as
+/// a pass of its own.
+func simplifyDebugReconstructionBlocks(in function: Function, _ context: FunctionPassContext,
+                                       canonicalizeOperands: Bool, useSubpasses: Bool) {
   var worklist = InstructionWorklist(context)
   defer { worklist.deinitialize() }
 
@@ -202,7 +216,7 @@ private func runDebugReconstructionBlockSimplification(on function: Function, _ 
       continue
     }
     // Use a subpass for each debug_value (operand simplification) and for each instruction in the reconstruction block.
-    if !context.continueWithNextSubpassRun(for: debugValue) {
+    if useSubpasses, !context.continueWithNextSubpassRun(for: debugValue) {
       return
     }
 
@@ -219,7 +233,7 @@ private func runDebugReconstructionBlockSimplification(on function: Function, _ 
         continue
       }
       if let simplifiable = instruction as? DebugReconstructionBlockSimplifiable {
-        if !context.continueWithNextSubpassRun(for: instruction) {
+        if useSubpasses, !context.continueWithNextSubpassRun(for: instruction) {
           return
         }
         simplifiable.simplifyForDebugReconstructionBlock(simplifyCtxt)
@@ -230,8 +244,10 @@ private func runDebugReconstructionBlockSimplification(on function: Function, _ 
     for instruction in debugBB.instructions.reversed() where instruction.isTriviallyDead {
       context.erase(instruction: instruction)
     }
-    debugValue.eraseDeadOperands(context)
-              .collapseTrivialReconstruction(context)
+    if canonicalizeOperands {
+      debugValue.eraseDeadOperands(context)
+                .collapseTrivialReconstruction(context)
+    }
   }
 }
 
@@ -308,4 +324,18 @@ private extension DebugValueInst {
       _ = replaceOperands(with: [undef], context)
     }
   }
+}
+
+/// Lets the C++ side simplify the debug reconstruction blocks of a function outside of the
+/// simplification pass. Used by the optimizer statistics, which need to know whether a
+/// variable still has a location.
+func registerDebugReconstructionSimplification() {
+  BridgedOptimizerUtilities.registerDebugReconstructionSimplification(
+    { (bridgedCtxt: BridgedContext, bridgedFunction: BridgedFunction) in
+      let context = FunctionPassContext(_bridged: bridgedCtxt)
+      // This may run in the middle of another pass, so it must not replace debug values.
+      simplifyDebugReconstructionBlocks(in: bridgedFunction.function, context,
+                                        canonicalizeOperands: false, useSubpasses: false)
+    }
+  )
 }

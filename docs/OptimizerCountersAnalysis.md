@@ -54,8 +54,8 @@ The following statistics can be recorded:
 
   * For SILFunctions: the number of SIL basic blocks for each SILFunction, the
     number of SIL instructions, the number of SILInstructions of a specific
-    kind (e.g. a number of alloc_ref instructions), the number of lost and
-    killed debug variables
+    kind (e.g. a number of alloc_ref instructions), the number of dropped
+    debug variables
 
   * For SILModules: the number of SIL basic blocks in the SILModule, the number
     of SIL instructions, the number of SILFunctions, the number of
@@ -129,17 +129,31 @@ not track the number of debug variables: it counts the number of debug variables
 that were present, but aren't anymore. If a variable changes location or scope,
 which is not allowed, it will be counted as lost.
 
-The killed debug variables counter works the same way, and is enabled by using
+The killed and degraded debug variables counters are enabled together, by using
 the `-Xllvm -sil-stats-killed-variables` command-line option. Instead of the
-variables a pass removed, it counts the variables a pass downgraded: the ones
-which had a location, and are now only described by `undef`, which the debugger
-reports as optimized out. A variable which disappeared entirely is lost, not
-killed: the two counters never count the same variable twice.
+variables a pass removed, they count the variables a pass downgraded. Each
+variable of a function is in one of these states:
 
-A variable is considered to have a location as long as one of the instructions
-describing it has one, as the others may only describe a fragment of it. An
-allocation always locates its variable, and so does a `debug_value` with a
-reconstruction block and no operand, which describes a constant.
+  * *live*: nothing describing it is `undef`.
+  * *partial*: some of it is `undef`. Either it is reconstructed from an
+    `undef`, or some of its fragments are `undef` while others are not. The
+    debugger shows what is left of it.
+  * *killed*: everything describing it is `undef`, and the debugger reports it
+    as optimized out.
+  * *lost*: the function does not describe it at all anymore.
+
+`killedvars` counts the variables which became killed, and `degradedvars` the
+ones which went from live to partial. A variable which was already partial is
+not counted again, as there is no telling how much more of it was lost. The
+counters never count the same variable twice, and a lost variable is only ever
+counted as lost.
+
+Reading these states requires the debug reconstruction blocks to be
+canonicalized, so that an `undef` which the reconstruction depends on has been
+folded through it, and one which it does not depend on leaves no trace. The
+option therefore runs the debug reconstruction block simplification before
+collecting the statistics. This only changes SIL which is invisible to the
+optimizer, but it does mean the option is not entirely free of side effects.
 
 ### Subpass level counters
 Passes which transform one instruction or value at a time report each of those
@@ -230,8 +244,8 @@ And for counter stats it looks like this:
     counters collection, when changes to the SILFunction counters are logged 
     unconditionally, without any on-line filtering.
 * `CounterName` is typically one of `block`, `inst`, `function`, `memory`,
-   `lostvars`, `killedvars`, or `inst_instruction_name` if you collect counters
-   for specific kinds of SIL instructions.
+   `lostvars`, `killedvars`, `degradedvars`, or `inst_instruction_name` if you
+   collect counters for specific kinds of SIL instructions.
 * `Symbol` is e.g. the name of a function
 * `StageName` is the name of the current optimizer pipeline stage
 * `TransformName` is the name of the current optimizer transformation/pass. The
@@ -247,11 +261,11 @@ And for counter stats it looks like this:
    applies to the subpass number, so a counter recorded at `4390.7` is
    reproduced with `-Xllvm -sil-opt-pass-count -Xllvm 4391.8`
 
-## Extract Lost and Killed Variables per Pass
+## Extract Dropped Variables per Pass
 
 For dropped variables, there is a script to output a CSV with only the amount of
-lost and killed variables per pass. You can then easily open the resulting CSV in
-Numbers to make graphs.
+lost, killed and degraded variables per pass. You can then easily open the
+resulting CSV in Numbers to make graphs.
 
 `utils/process-stats-lost-variables csv_file_with_counters > csv_aggregate`
 
